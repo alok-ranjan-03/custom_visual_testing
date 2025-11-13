@@ -1,5 +1,5 @@
 looker.plugins.visualizations.add({
-  id: "matrix_table_v4",
+  id: "matrix_table_v4_fixed",
   label: "Matrix Table (Full Power BI Style)",
   options: {
     show_totals: {
@@ -58,7 +58,7 @@ looker.plugins.visualizations.add({
   },
 
   create: function (element, config) {
-    const style = `
+    element.innerHTML = `
       <style>
         .matrix-table {
           width: 100%;
@@ -92,13 +92,9 @@ looker.plugins.visualizations.add({
         .hidden-row {
           display: none;
         }
-        .fade-in {
-          animation: fadeIn 0.25s ease;
-        }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
       </style>
+      <div id="matrix-container"></div>
     `;
-    element.innerHTML = style + `<div id="matrix-container"></div>`;
   },
 
   updateAsync: function (data, element, config, queryResponse, details, done) {
@@ -117,7 +113,6 @@ looker.plugins.visualizations.add({
       return;
     }
 
-    // Helpers
     const getValue = (valObj) => parseFloat(valObj?.value) || 0;
     const formatValue = (val, conf) => {
       if (!conf.enable_conditional) return val.toLocaleString();
@@ -128,11 +123,10 @@ looker.plugins.visualizations.add({
       return val.toLocaleString();
     };
 
-    function computeTotals(rows, measureName) {
-      return rows.reduce((acc, r) => acc + getValue(r[measureName]), 0);
-    }
+    const computeTotals = (rows, measureName) =>
+      rows.reduce((acc, r) => acc + getValue(r[measureName]), 0);
 
-    // Recursive builder for groups
+    // Recursive grouping (returns rows only)
     function buildGroup(rows, dimIndex, parentKey = "", level = 0) {
       if (dimIndex >= dims.length) return "";
 
@@ -150,7 +144,6 @@ looker.plugins.visualizations.add({
         const id = `${parentKey || "root"}-${dimIndex}-${i}`;
         const children = groups[key];
 
-        // Parent row
         html += `<tr class="level-${level}" data-group="${id}">
           <td colspan="${dimIndex}"></td>
           <td>
@@ -158,35 +151,37 @@ looker.plugins.visualizations.add({
               dimIndex < dims.length - 1
                 ? `<span class="toggle-btn" data-target="${id}">➕</span>`
                 : ""
-            }
-            ${key}
+            }${key}
           </td>`;
 
         meas.forEach((m) => {
           const subtotal = computeTotals(children, m.name);
           html += `<td>${formatValue(subtotal, config)}</td>`;
         });
-        html += `</tr>`;
+        html += "</tr>";
 
-        // Child rows
+        // Add children rows (as hidden by default)
         if (dimIndex < dims.length - 1) {
-          const subHTML = buildGroup(children, dimIndex + 1, id, level + 1);
-          html += `<tbody class="hidden-row" data-parent="${id}">${subHTML}</tbody>`;
+          html += buildGroup(children, dimIndex + 1, id, level + 1)
+            .split("<tr")
+            .join(`<tr class="hidden-row" data-parent="${id}"`);
         } else {
           children.forEach((r) => {
-            html += `<tr class="hidden-row fade-in" data-parent="${id}">`;
+            html += `<tr class="hidden-row" data-parent="${id}">`;
             dims.forEach((d, di) => {
-              html += `<td style="padding-left:${20 * (di + 1)}px">${r[d.name]?.value || ""}</td>`;
+              html += `<td style="padding-left:${20 * (di + 1)}px">${
+                r[d.name]?.value || ""
+              }</td>`;
             });
             meas.forEach((m) => {
               const val = getValue(r[m.name]);
               html += `<td>${formatValue(val, config)}</td>`;
             });
-            html += `</tr>`;
+            html += "</tr>";
           });
         }
 
-        // Row subtotal (only at last dimension)
+        // Subtotal (for last level)
         if (config.show_totals && dimIndex === dims.length - 1) {
           html += `<tr class="subtotal-row hidden-row" data-parent="${id}">
             <td colspan="${dims.length}">${key} Subtotal</td>`;
@@ -194,13 +189,13 @@ looker.plugins.visualizations.add({
             const subtotal = computeTotals(children, m.name);
             html += `<td>${formatValue(subtotal, config)}</td>`;
           });
-          html += "</tr>";
+          html += "</tr>`;
         }
       });
       return html;
     }
 
-    // Header
+    // Build complete table
     let html = `<table class="matrix-table"><thead><tr>`;
     dims.forEach((d) => (html += `<th>${d.label_short}</th>`));
     meas.forEach((m) => (html += `<th>${m.label_short}</th>`));
@@ -208,28 +203,20 @@ looker.plugins.visualizations.add({
     html += buildGroup(data, 0);
     html += `</tbody>`;
 
-    // Column Subtotals & Grand Total
+    // Grand Total
     if (config.show_totals) {
       html += `<tfoot><tr class="grand-total"><td colspan="${dims.length}">Grand Total</td>`;
       meas.forEach((m) => {
         const total = computeTotals(data, m.name);
         html += `<td>${formatValue(total, config)}</td>`;
       });
-      html += "</tr>";
-
-      // Column-level totals
-      html += `<tr class="grand-total"><td colspan="${dims.length}">Column Subtotal</td>`;
-      meas.forEach((m) => {
-        const total = computeTotals(data, m.name);
-        html += `<td>${formatValue(total, config)}</td>`;
-      });
-      html += "</tr></tfoot>`;
+      html += `</tr></tfoot>`;
     }
 
     html += `</table>`;
     container.innerHTML = html;
 
-    // Expand/Collapse toggle logic
+    // Toggle expand/collapse
     container.querySelectorAll(".toggle-btn").forEach((btn) => {
       btn.addEventListener("click", function () {
         const id = this.getAttribute("data-target");
