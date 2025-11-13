@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Drilldown Table – Local Test</title>
+  <!-- styling removed from head — injected inside create() -->
+</head>
+<body>
+  <h2>Looker Drilldown Table – Local Demo</h2>
+  <div id="viz"></div>
+
+  <script>
+    // Mock Looker environment
+    const looker = { plugins: { visualizations: { add: fn => fn } } };
+  </script>
+
+  <!-- Your Visualization Code (same as production) -->
+  <script>
+    // capture the registered plugin so we can call create/updateAsync later
+    const vizPlugin = looker.plugins.visualizations.add({
+       id: "drilldown_table_v1",
+       label: "Drilldown Table",
+       options: {},
+
+       create: function (element) {
+         // Inject styles here so all presentation lives in the production JS block
+         element.innerHTML = `
+    <style>
+      .drill-container { font-family: Roboto, sans-serif; width:100%; }
+      .drill-table-wrap {
+        width:100%;
+        background:#fff;
+        border-radius:8px;
+        padding:8px 10px;
+        box-shadow:0 2px 6px rgba(0,0,0,0.05);
+      }
+      table.drill-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:14px; }
+      thead.drill-thead th {
+        background: linear-gradient(180deg,#fafafa,#f2f2f2);
+        color:#222;
+        padding:10px 12px;
+        text-align:left;
+        font-weight:600;
+        border-bottom:1px solid #e6e6e6;
+        vertical-align:middle;
+      }
+      tbody.drill-tbody td {
+        padding:10px 12px;
+        border-bottom:1px solid #f0f0f0;
+        vertical-align:middle;
+        white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
+      }
+      th.col-region { width:45%; }
+      th.col-country { width:25%; }
+      th.col-city { width:20%; }
+      th.col-sales, td.col-sales { width:10%; text-align:right; font-variant-numeric:tabular-nums; }
+
+      .node-label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; user-select:none; }
+      .node-label .toggle { display:inline-block; width:14px; text-align:center; color:#666; }
+      
+      .muted { color:#777; opacity:0.9; }
+      .no-data { text-align:center; color:#777; padding:20px; display:none; }
+
+      /* New styles for highlighting */
+      .highlight { border: 2px solid #007bff; background-color: #e7f1ff; }
+      .highlight-child { background-color: #f0f8ff; }
+    </style>
+
+          <div class="drill-container">
+            <div class="drill-table-wrap">
+              <table class="drill-table">
+                <thead class="drill-thead"></thead>
+                <tbody class="drill-tbody"></tbody>
+              </table>
+              <div class="no-data">No data found</div>
+            </div>
+          </div>
+        `;
+       },
+
+       updateAsync: function (data, element, config, queryResponse, details, done) {
+         const thead = element.querySelector("thead.drill-thead");
+         const tbody = element.querySelector("tbody.drill-tbody");
+         const noData = element.querySelector(".no-data");
+
+         if (!data || data.length === 0) {
+          thead.innerHTML = "";
+          tbody.innerHTML = "";
+          noData.style.display = "block";
+          done();
+          return;
+         }
+         noData.style.display = "none";
+
+         const dims = queryResponse.fields.dimension_like.map(d => d.name);
+         const meas = queryResponse.fields.measure_like.map(m => m.name);
+
+         if (dims.length === 0 || meas.length === 0) {
+          thead.innerHTML = "";
+          tbody.innerHTML = "";
+          noData.style.display = "block";
+          noData.innerText = "Add at least one dimension and one measure.";
+          done();
+          return;
+         }
+
+         function extractValue(row, field) {
+          return row[field]?.value ?? "(blank)";
+         }
+
+         function buildHierarchy(rows, level = 0) {
+          if (level >= dims.length) return [];
+          const field = dims[level];
+          const groups = {};
+          rows.forEach(r => {
+            const key = extractValue(r, field);
+            if (!groups[key]) groups[key] = [];
+            groups[key].push(r);
+          });
+          return Object.entries(groups).map(([key, group]) => ({
+            name: key,
+            level,
+            value: group.reduce((sum, rr) => sum + (Number(rr[meas[0]]?.value) || 0), 0),
+            children: buildHierarchy(group, level + 1)
+          }));
+         }
+
+         const hierarchy = buildHierarchy(data);
+         const expanded = new Set();
+
+         function computeMaxVisibleLevel() {
+          if (expanded.size === 0) return 0;
+          let maxExpanded = -1;
+          expanded.forEach(id => {
+            const lvl = id.split("-").length - 1;
+            if (lvl > maxExpanded) maxExpanded = lvl;
+          });
+          return Math.min(dims.length - 1, Math.max(0, maxExpanded + 1));
+         }
+
+         function renderHeader(visibleLevel) {
+          let html = "<tr>";
+          for (let i = 0; i <= visibleLevel; i++) {
+            const cls = i === 0 ? 'col-region' : (i === 1 ? 'col-country' : 'col-city');
+            html += `<th class="${cls}">${dims[i].replace(".", " ")}</th>`;
+          }
+          html += `<th class="col-sales">${meas[0].replace(".", " ")}</th></tr>`;
+          thead.innerHTML = html;
+         }
+
+         function renderRows() {
+          const visibleLevel = computeMaxVisibleLevel();
+          renderHeader(visibleLevel);
+          tbody.innerHTML = "";
+
+          function walk(nodes, parentId = "") {
+            nodes.forEach((node, idx) => {
+              const id = parentId ? `${parentId}-${idx}` : `${idx}`;
+              const tr = document.createElement("tr");
+              const hasChildren = node.children && node.children.length;
+              const isExpanded = expanded.has(id);
+
+              // Highlight the previous level when current node level is i + 1
+              if (node.level > 0) {
+                const previousLevelId = parentId ? `${parentId}-${idx - 1}` : `${idx - 1}`;
+                const previousRow = tbody.querySelector(`tr[data-id="${previousLevelId}"]`);
+                if (previousRow) {
+                  previousRow.classList.add("highlight");
+                }
+              }
+
+              const label = document.createElement("span");
+              label.className = `node-label ${hasChildren ? (isExpanded ? "expanded" : "collapsed") : ""}`;
+              label.innerHTML = hasChildren
+                ? `<span class="toggle">${isExpanded ? "▼" : "▶"}</span><span>${node.name}</span>`
+                : `<span style="display:inline-block;width:14px;"></span><span>${node.name}</span>`;
+
+              // Create cells in the currently visible header order
+              const showCountry = visibleLevel >= 1;
+              const showCity = visibleLevel >= 2;
+
+              // create region cell
+              const tdRegion = document.createElement("td");
+              tdRegion.className = "col-region";
+              // create country/city cells only if header shows them
+              const tdCountry = showCountry ? document.createElement("td") : null;
+              if (tdCountry) tdCountry.className = "col-country";
+              const tdCity = showCity ? document.createElement("td") : null;
+              if (tdCity) tdCity.className = "col-city";
+              const tdSales = document.createElement("td");
+              tdSales.className = "col-sales";
+              tdSales.textContent = node.value.toFixed(2);
+
+              // place label into the correct visible column depending on node.level
+              if (node.level === 0) {
+                tdRegion.appendChild(label);
+                if (tdCountry) tdCountry.textContent = "";
+                if (tdCity) tdCity.textContent = "";
+              } else if (node.level === 1) {
+                if (tdCountry) tdCountry.appendChild(label);
+                else {
+                  const muted = label.cloneNode(true);
+                  muted.classList.add("muted");
+                  tdRegion.appendChild(muted);
+                }
+                if (tdCity) tdCity.textContent = "";
+              } else {
+                if (tdCity) tdCity.appendChild(label);
+                else {
+                  const muted = label.cloneNode(true);
+                  muted.classList.add("muted");
+                  tdRegion.appendChild(muted);
+                }
+                if (tdCountry && tdCountry.childNodes.length === 0) tdCountry.textContent = "";
+              }
+
+              // assemble cells in header order
+              tr.appendChild(tdRegion);
+              if (tdCountry) tr.appendChild(tdCountry);
+              if (tdCity) tr.appendChild(tdCity);
+              tr.appendChild(tdSales);
+
+              // Add highlight for parent row when expanded
+              if (isExpanded) {
+                tr.classList.add("highlight-child");
+              }
+
+              // click toggles expand state
+              label.addEventListener("click", e => {
+                e.stopPropagation();
+                if (!hasChildren) return;
+                if (expanded.has(id)) expanded.delete(id);
+                else expanded.add(id);
+                renderRows();
+              });
+
+              tbody.appendChild(tr);
+
+              if (isExpanded && hasChildren) walk(node.children, id);
+            });
+          }
+
+          walk(hierarchy);
+         }
+
+        renderRows();
+        done && done();
+      }
+     });
+  </script>
+
+  <!-- Run the visualization locally -->
+  <script>
+    const vizContainer = document.getElementById("viz");
+    // call create/update on the captured plugin object
+    vizPlugin.create(vizContainer);
+
+    // sample Looker-like dummy data
+    const dummyData = [
+      { "region": { value: "Asia" }, "country": { value: "India" }, "city": { value: "Delhi" }, "sales": { value: 100 } },
+      { "region": { value: "Asia" }, "country": { value: "India" }, "city": { value: "Mumbai" }, "sales": { value: 80 } },
+      { "region": { value: "Asia" }, "country": { value: "Japan" }, "city": { value: "Tokyo" }, "sales": { value: 120 } },
+      { "region": { value: "Europe" }, "country": { value: "France" }, "city": { value: "Paris" }, "sales": { value: 200 } },
+      { "region": { value: "Europe" }, "country": { value: "Germany" }, "city": { value: "Berlin" }, "sales": { value: 150 } },
+      { "region": { value: "Europe" }, "country": { value: "Germany" }, "city": { value: "Munich" }, "sales": { value: 130 } }
+    ];
+
+    const queryResponse = {
+      fields: {
+        dimension_like: [
+          { name: "region" },
+          { name: "country" },
+          { name: "city" }
+        ],
+        measure_like: [
+          { name: "sales" }
+        ]
+      }
+    };
+
+    // simulate updateAsync call
+    vizPlugin.updateAsync(dummyData, vizContainer, {}, queryResponse, {}, () => console.log("Render complete"));
+  </script>
+</body>
+</html>
